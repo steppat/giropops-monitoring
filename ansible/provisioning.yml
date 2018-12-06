@@ -1,0 +1,87 @@
+---
+- hosts: all
+  become: yes
+
+  handlers:
+    - name: restart netdata
+      service:
+        name: netdata
+        state: restarted
+      become: yes
+
+  tasks:
+  - name: Add Docker GPG key
+    apt_key: url=https://download.docker.com/linux/ubuntu/gpg
+
+  - name: Add Docker APT repository
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ansible_distribution_release}} stable
+
+  - name: Install base packages
+    apt:
+      name: ['wget', 'apt-transport-https','ca-certificates','curl','software-properties-common','docker-ce']
+      state: present
+      update_cache: yes
+
+  - stat:
+      path: giropops/conf/prometheus/prometheus.yml
+    register: prometheus_file
+
+  - name: Clone giropops-monitoring repo
+    git:
+      repo: 'https://github.com/steppat/giropops-monitoring.git'
+      dest: giropops
+      version: master
+      force: yes
+    when:
+      - not prometheus_file.stat.exists
+
+  - name: Copy conf para alertmanager/config.conf
+    copy:
+      src: "alertmanager-config.conf"
+      dest: "giropops/conf/alertmanager/config.conf"
+
+  - command: grep '192.168.50.10' giropops/conf/prometheus/prometheus.yml
+    ignore_errors: yes
+    register: grep_result
+
+  - name: Replace IP Adress in prometheus/prometheus.yml
+    replace:
+      path: "giropops/conf/prometheus/prometheus.yml"
+      regexp: "{{ item.regex }}"
+      replace: "{{ item.value }}"
+      backup: yes
+    with_items:
+      - { regex: 'YOUR_NETDATA_IP', value: "192.168.50.10"}
+    when: grep_result.stdout == ''
+
+  - name: Install Netdata
+    apt:
+      name: netdata
+      state: present
+
+  - name: Replace IP Adress in /etc/netdata/netdata.conf
+    replace:
+      path: "/etc/netdata/netdata.conf"
+      regexp: "{{ item.regex }}"
+      replace: "{{ item.value }}"
+      backup: yes
+    with_items:
+      - { regex: '127.0.0.1', value: "192.168.50.10"}
+    notify:
+      - restart netdata
+
+  - name: Check if Docker node exist (swarm is running)
+    shell: docker node ls
+    ignore_errors: yes
+    register: docker_node_ls_status
+
+
+  - name: Running docker swarm
+    command: docker swarm init --advertise-addr 192.168.50.10
+    register: swarm_result
+    when: docker_node_ls_status.rc == 1
+
+  - name: Running docker stack docker-compose.yml
+    command: docker stack deploy -c giropops/docker-compose.yml giropops
+    register: compose_result
